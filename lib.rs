@@ -484,6 +484,20 @@ mod bank {
             Ok(())
         }
 
+        /// Get balance of an account
+        #[ink(message)]
+        pub fn get_balance(&mut self,
+            account: AccountId) ->  Result<Ledger, Error> {
+
+            for ledger in self.ledgers.iter() {
+                if ledger.account == account {
+                    return Ok(ledger.clone()); 
+                }
+            }
+
+            Err(Error::AccountNotFound)
+        }
+
     }
 
     /// Unit tests
