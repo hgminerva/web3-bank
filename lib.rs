@@ -11,12 +11,20 @@ mod bank {
     pub enum Error {
         /// Bad origin error, e.g., wrong caller
         BadOrigin,
+        /// Bank is close
+        BankIsClose,
+        /// Bank account maximum reached
+        BankAccountMaxOut,
         /// There is already an existing account
         AccountAlreadyExist,
         /// Account not found
         AccountNotFound,
         /// Account Balance Insufficient
         AccountBalanceInsufficient,
+        /// Account Balance Overflow
+        AccountBalanceOverflow,
+        /// Account frozen
+        AccountFrozen,
     }
 
     /// Success Messages
@@ -25,6 +33,10 @@ mod bank {
     pub enum Success {
         /// Bank setup successful
         BankSetupSuccess,
+        /// Bank close successful
+        BankCloseSuccess,
+        /// Bank open successful
+        BankOpenSuccess,
         /// Account deposit successful
         AccountDepositSuccess,
         /// Account withdrawal successful
@@ -127,6 +139,7 @@ mod bank {
             self.manager = manager;
             self.maximum_accounts = maximum_accounts;
             self.ledgers =  Vec::new();
+            self.status = 0;
 
             self.env().emit_event(BankingEvent {
                 operator: caller,
@@ -147,6 +160,330 @@ mod bank {
                 self.status,
             )
         }
+
+        /// Close the bank
+        #[ink(message)]
+        pub fn close(&mut self) -> Result<(), Error> {
+
+            // Closing the can only be done by the manager
+            let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // This will close the bank
+            self.status = 1;
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::BankCloseSuccess),
+            });
+
+            Ok(())
+        }
+
+        /// Open the bank
+        #[ink(message)]
+        pub fn open(&mut self) -> Result<(), Error> {
+
+            // Closing the can only be done by the manager
+            let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // This will open the bank
+            self.status = 0;
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::BankCloseSuccess),
+            });
+
+            Ok(())
+        }        
+
+        /// Deposit to the bank
+        #[ink(message)]
+        pub fn deposit(&mut self,
+            account: AccountId,
+            amount: u128) -> Result<(), Error> {
+
+            // Deposit can only be done by the manager once the transfer of the 
+            // asset is verified through the tx-hash.
+            let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            }
+
+            // Search if the account exist already, if it does in just add to the
+            // ledger the amount deposited, if not then create the new account.
+            // 1. Update a balance
+            let mut account_found = false;
+            for ledger in self.ledgers.iter_mut() {
+                if ledger.account == account {
+                    
+                    ledger.balance = ledger
+                        .balance
+                        .checked_add(amount)
+                        .ok_or(Error::AccountBalanceOverflow)?; 
+
+                    account_found = true;
+                    break;
+                }
+            }
+            // 2. Create a new account if the account does not exist
+            if !account_found {
+                if self.ledgers.len() as u16 >= self.maximum_accounts {
+                    self.env().emit_event(BankingEvent {
+                        operator: caller,
+                        status: BankTransactionStatus::EmitError(Error::BankAccountMaxOut),
+                    });
+                    return Ok(());
+                }
+                let new_ledger = Ledger {
+                    account,
+                    balance: amount,
+                    status: 1, // 1 = Liquid
+                };
+                self.ledgers.push(new_ledger);
+            }
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountDepositSuccess),
+            });
+
+            Ok(())
+        }
+
+        /// Withdraw from the bank
+        #[ink(message)]
+        pub fn withdraw(&mut self,
+            account: AccountId,
+            amount: u128) -> Result<(), Error> {
+
+            // Withdraw can only be done by the manager once the balance of the account
+            // is sufficient for withdrawal
+            let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            }
+
+            // Search if the account exist already, if it does, check if the balance is
+            // sufficient, if so, deduct the ledger, if not raise a balance insufficient
+            // error.
+            let mut account_found = false;
+            for ledger in self.ledgers.iter_mut() {
+                if ledger.account == account {
+                    account_found = true;
+
+                    // Check if balance is sufficient
+                    if ledger.balance < amount {
+                        self.env().emit_event(BankingEvent {
+                            operator: caller,
+                            status: BankTransactionStatus::EmitError(Error::AccountBalanceInsufficient),
+                        });
+                        return Ok(());
+                    }
+
+                    // Deduct the amount
+                    ledger.balance -= amount;
+
+                    break;
+                }
+            }
+
+            if !account_found {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::AccountNotFound),
+                });
+                return Ok(());
+            }
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountWithdrawalSuccess),
+            });
+
+            Ok(())
+        }
+
+        /// Credit to the account (add).  This is done by the manager only.
+        #[ink(message)]
+        pub fn credit(&mut self,
+            account: AccountId,
+            amount: u128) -> Result<(), Error> {
+            
+            // Credit is adding to the balance of an account, this is done only
+            // by the manager.
+            let caller = self.env().caller();
+
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            }
+
+            // Search for the caller account in the ledger, if found, add to the balance
+            // the given amount.
+            let mut account_found = false;
+
+            for ledger in self.ledgers.iter_mut() {
+                if ledger.account == account {
+                    account_found = true;
+
+                    // Check if account is liquid
+                    if ledger.status != 1 {
+                        self.env().emit_event(BankingEvent {
+                            operator: caller,
+                            status: BankTransactionStatus::EmitError(Error::AccountFrozen),
+                        });
+                        return Ok(());
+                    }
+
+                    // Add the amount to the balance safely
+                    match ledger.balance.checked_add(amount) {
+                        Some(new_balance) => ledger.balance = new_balance,
+                        None => {
+                            self.env().emit_event(BankingEvent {
+                                operator: caller,
+                                status: BankTransactionStatus::EmitError(Error::AccountBalanceOverflow),
+                            });
+                            return Ok(());
+                        }
+                    }
+
+                    break;
+                }
+            }
+
+            if !account_found {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::AccountNotFound),
+                });
+                return Ok(());
+            }
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+            });
+
+            Ok(())
+        }
+
+        /// Debit to the account (deduct).  This is done by any depositor.
+        #[ink(message)]
+        pub fn debit(&mut self,
+            amount: u128) -> Result<(), Error> {
+            
+            let caller = self.env().caller();
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            }
+
+            // Search for the caller account in the ledger
+            let mut account_found = false;
+
+            for ledger in self.ledgers.iter_mut() {
+                if ledger.account == caller {
+                    account_found = true;
+
+                    // Check if account is liquid
+                    if ledger.status != 1 {
+                        self.env().emit_event(BankingEvent {
+                            operator: caller,
+                            status: BankTransactionStatus::EmitError(Error::AccountFrozen),
+                        });
+                        return Ok(());
+                    }
+
+                    // Check if balance is sufficient
+                    if ledger.balance < amount {
+                        self.env().emit_event(BankingEvent {
+                            operator: caller,
+                            status: BankTransactionStatus::EmitError(Error::AccountBalanceInsufficient),
+                        });
+                        return Ok(());
+                    }
+
+                    ledger.balance -= amount;
+
+                    break;
+                }
+            }
+
+            // Account not found
+            if !account_found {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::AccountNotFound),
+                });
+                return Ok(());
+            }
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountDebitSuccess),
+            });
+
+            Ok(())
+        }
+
     }
 
     /// Unit tests

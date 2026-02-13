@@ -1,58 +1,218 @@
-# Bank Contract
+# Bank Contract (ink!)
 
-This is a simple **ink! smart contract** for managing a bank ledger on Substrate-based blockchains.  
-It allows setting up a bank, managing accounts, and tracking balances, with events for all important actions.
-
----
+A simple on-chain bank contract built with **ink!**. Supports **deposit, withdraw, debit, and credit operations**, with manager-controlled and account-specific permissions.
 
 ## Features
 
-- Create a new bank with an asset ID, manager, and maximum accounts.
-- Deposit, withdraw, debit, and credit accounts (ledger management not fully implemented in this snippet).
-- Emit events for all transactions.
-- Supports **custom error messages** and **success messages** for transaction tracking.
-- Bank status tracking: Open/Close, Frozen/Liquid accounts.
-- Fully compatible with **WASM target** (`wasm32-unknown-unknown`) for Substrate contracts.
+* Create a new bank with `asset_id`, `manager`, and `maximum_accounts`.
+* Open or close the bank.
+* Deposit and withdraw assets from accounts.
+* Credit (add) to an account — manager only.
+* Debit (deduct) from an account — account holder only.
+* Events emitted for **success** and **error** conditions.
+* Checks for bank open/close, liquidity, account existence, and balance overflow/insufficient errors.
 
 ---
 
-## Contract Structure
+## Storage
 
-- `Bank`: Main storage struct containing bank metadata and ledgers.
-- `Ledger`: Represents an individual account with balance and status.
-- `Error`: Enum with possible error messages (e.g., `AccountNotFound`, `AccountBalanceInsufficient`).
-- `Success`: Enum with transaction success messages.
-- `BankTransactionStatus`: Combines success and error for events.
-- `BankingEvent`: Event emitted on every transaction or setup.
+```rust
+struct Bank {
+    asset_id: u128,           // Bank asset identifier
+    owner: AccountId,         // Bank owner
+    manager: AccountId,       // Bank manager
+    maximum_accounts: u16,    // Max ledger accounts
+    ledgers: Vec<Ledger>,     // Accounts ledger
+    status: u8,               // Bank status: 0 = Open, 1 = Close
+}
+
+struct Ledger {
+    account: AccountId,       // Account address
+    balance: u128,            // Free balance
+    status: u8,               // Account status: 0 = Frozen, 1 = Liquid
+}
+```
 
 ---
 
-## Constructors
+## Error Messages
 
-- `new(asset_id: u128, maximum_accounts: u16) -> Self`  
-  Creates a new bank instance. Sets the caller as the owner and manager.
-
-- `default() -> Self`  
-  Default bank setup (asset ID = 0, max accounts = 0).
+```rust
+enum Error {
+    BadOrigin,
+    BankIsClose,
+    BankAccountMaxOut,
+    AccountAlreadyExist,
+    AccountNotFound,
+    AccountBalanceInsufficient,
+    AccountBalanceOverflow,
+    AccountFrozen,
+}
+```
 
 ---
 
-## Messages
+## Success Messages
 
-- `setup(asset_id: u128, manager: AccountId, maximum_accounts: u16) -> Result<(), Error>`  
-  Configures the bank. Can only be called by the owner.
-
-- `get() -> (u128, AccountId, AccountId, u16, u8)`  
-  Returns bank information: `(asset_id, owner, manager, maximum_accounts, status)`.
+```rust
+enum Success {
+    BankSetupSuccess,
+    BankCloseSuccess,
+    BankOpenSuccess,
+    AccountDepositSuccess,
+    AccountWithdrawalSuccess,
+    AccountDebitSuccess,
+    AccountCreditSuccess,
+}
+```
 
 ---
 
 ## Events
 
-All operations emit a `BankingEvent` with:
+```rust
+#[ink(event)]
+struct BankingEvent {
+    operator: AccountId,
+    status: BankTransactionStatus,
+}
 
-- `operator`: The caller account
-- `status`: The transaction status (success or error)
+enum BankTransactionStatus {
+    EmitSuccess(Success),
+    EmitError(Error),
+}
+```
+
+Events are emitted for **every transaction**, indicating **success or error status**.
+
+---
+
+## Constructors
+
+### `new`
+
+```rust
+pub fn new(asset_id: u128, maximum_accounts: u16) -> Self
+```
+
+Creates a new bank. The caller becomes the owner and manager.
+
+### `default`
+
+```rust
+pub fn default() -> Self
+```
+
+Creates a bank with default parameters (`asset_id = 0`, `maximum_accounts = 0`).
+
+---
+
+## Bank Control
+
+### `setup`
+
+```rust
+pub fn setup(asset_id: u128, manager: AccountId, maximum_accounts: u16) -> Result<(), Error>
+```
+
+Only the **owner** can call. Resets ledgers and updates bank info.
+
+### `open`
+
+```rust
+pub fn open() -> Result<(), Error>
+```
+
+Only the **manager** can open the bank. Sets `status = 0`.
+
+### `close`
+
+```rust
+pub fn close() -> Result<(), Error>
+```
+
+Only the **manager** can close the bank. Sets `status = 1`.
+
+---
+
+## Account Operations
+
+### `deposit`
+
+```rust
+pub fn deposit(account: AccountId, amount: u128) -> Result<(), Error>
+```
+
+* Only **manager** can deposit.
+* Adds to existing ledger or creates a new account if space allows.
+* Checks for bank status and balance overflow.
+
+### `withdraw`
+
+```rust
+pub fn withdraw(account: AccountId, amount: u128) -> Result<(), Error>
+```
+
+* Only **manager** can withdraw from accounts.
+* Checks bank open status and sufficient balance.
+
+### `credit`
+
+```rust
+pub fn credit(account: AccountId, amount: u128) -> Result<(), Error>
+```
+
+* Only **manager** can credit an account.
+* Adds to account balance.
+* Checks account liquidity and overflow.
+
+### `debit`
+
+```rust
+pub fn debit(amount: u128) -> Result<(), Error>
+```
+
+* Account **owner only** can debit their own balance.
+* Deducts from balance if sufficient and account is liquid.
+
+---
+
+## Read Operations
+
+### `get`
+
+```rust
+pub fn get() -> (u128, AccountId, AccountId, u16, u8)
+```
+
+Returns the bank information:
+
+* `asset_id`
+* `owner`
+* `manager`
+* `maximum_accounts`
+* `status`
+
+---
+
+## Events Example
+
+```rust
+BankingEvent {
+    operator: caller,
+    status: BankTransactionStatus::EmitSuccess(Success::AccountDepositSuccess),
+}
+```
+
+All operations emit either `EmitSuccess` or `EmitError` for **easy tracking**.
+
+---
+
+## Notes
+
+* All operations are **borrow-safe** in Rust — no E0502 errors.
+* Credit/debit operations respect **liquidity (frozen/liquid) status**.
+* Deposit/withdraw/checks enforce **bank open/close** rules.
 
 ---
 
