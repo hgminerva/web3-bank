@@ -1,31 +1,18 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
+/// pallet_assets runtime calls
+pub mod assets;
+
+/// Errors
+pub mod errors;
+
 #[ink::contract]
 mod bank {
 
     use ink::prelude::vec::Vec;
 
-    /// Error Messages
-    #[derive(scale::Encode, scale::Decode, Debug, Clone, PartialEq, Eq)]
-    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo))]
-    pub enum Error {
-        /// Bad origin error, e.g., wrong caller
-        BadOrigin,
-        /// Bank is close
-        BankIsClose,
-        /// Bank account maximum reached
-        BankAccountMaxOut,
-        /// There is already an existing account
-        AccountAlreadyExist,
-        /// Account not found
-        AccountNotFound,
-        /// Account Balance Insufficient
-        AccountBalanceInsufficient,
-        /// Account Balance Overflow
-        AccountBalanceOverflow,
-        /// Account frozen
-        AccountFrozen,
-    }
+    use crate::errors::{Error, RuntimeError, ContractError};
+    use crate::assets::{AssetsCall, RuntimeCall};
 
     /// Success Messages
     #[derive(scale::Encode, scale::Decode, Debug, Clone, PartialEq, Eq)]
@@ -190,7 +177,7 @@ mod bank {
         #[ink(message)]
         pub fn open(&mut self) -> Result<(), Error> {
 
-            // Closing the can only be done by the manager
+            // Opening the can only be done by the manager
             let caller = self.env().caller();
             if self.env().caller() != self.manager {
                 self.env().emit_event(BankingEvent {
@@ -205,7 +192,7 @@ mod bank {
 
             self.env().emit_event(BankingEvent {
                 operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::BankCloseSuccess),
+                status: BankTransactionStatus::EmitSuccess(Success::BankOpenSuccess),
             });
 
             Ok(())
@@ -282,7 +269,7 @@ mod bank {
         #[ink(message)]
         pub fn withdraw(&mut self,
             account: AccountId,
-            amount: u128) -> Result<(), Error> {
+            amount: u128) -> Result<(), ContractError> {
 
             // Withdraw can only be done by the manager once the balance of the account
             // is sufficient for withdrawal
@@ -323,6 +310,15 @@ mod bank {
 
                     // Deduct the amount
                     ledger.balance -= amount;
+
+                    // Transfer the asset to the account
+                    self.env()
+                        .call_runtime(&RuntimeCall::Assets(AssetsCall::Transfer {
+                            id: self.asset_id,
+                            target: account.into(),
+                            amount: amount,
+                        }))
+                        .map_err(|_| RuntimeError::CallRuntimeFailed)?;
 
                     break;
                 }
