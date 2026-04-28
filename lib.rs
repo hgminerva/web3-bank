@@ -58,6 +58,12 @@ mod bank {
         pub account: AccountId,
         /// Free balance
         pub balance: u128,
+        /// Average daily balance.  Computed every incoming and outgoing transactions
+        pub adb: u128,
+        /// Average daily balance beginning block.  Sets upon creation of the ledger.
+        /// This is used to compute for the time-weighted average balance:
+        ///    adb = (balance x [current_block - adb_beginning_block]) / bank.daily_blocks
+        pub adb_beginning_block: u128,
         /// Status (0-Frozen, 1-Liquid)
         pub status: u8,
     }        
@@ -73,6 +79,8 @@ mod bank {
         pub manager: AccountId,
         /// Maximum accounts the bank ledger can handle
         pub maximum_accounts: u16,
+        /// Daily blocks
+        pub daily_blocks: u16,
         /// Bank ledgers
         pub ledgers: Vec<Ledger>,
         /// Status (0-Open, 1-Close)
@@ -84,7 +92,8 @@ mod bank {
         /// Create new bank
         #[ink(constructor)]
         pub fn new(asset_id: u128, 
-            maximum_accounts: u16) -> Self {
+            maximum_accounts: u16,
+            daily_blocks: u16) -> Self {
 
             let caller: ink::primitives::AccountId = Self::env().caller();
 
@@ -94,6 +103,7 @@ mod bank {
                 manager: caller,
                 maximum_accounts: maximum_accounts,
                 ledgers: Vec::new(),
+                daily_blocks: daily_blocks,
                 status: 0u8,
             }
         }
@@ -101,7 +111,7 @@ mod bank {
         /// Default setup
         #[ink(constructor)]
         pub fn default() -> Self {
-            Self::new(0u128, 0u16)
+            Self::new(0u128, 0u16, 1u16)
         }
 
         /// Setup bank
@@ -109,7 +119,8 @@ mod bank {
         pub fn setup(&mut self,
             asset_id: u128,
             manager: AccountId,
-            maximum_accounts: u16) -> Result<(), Error> {
+            maximum_accounts: u16,
+            daily_blocks: u16) -> Result<(), Error> {
             
             // Setup can only be done by the owner
             let caller = self.env().caller();
@@ -126,6 +137,7 @@ mod bank {
             self.manager = manager;
             self.maximum_accounts = maximum_accounts;
             self.ledgers =  Vec::new();
+            self.daily_blocks = daily_blocks;
             self.status = 0;
 
             self.env().emit_event(BankingEvent {
@@ -138,12 +150,13 @@ mod bank {
 
         /// Get the bank information
         #[ink(message)]
-        pub fn get(&self) -> (u128, AccountId, AccountId, u16, u8) {
+        pub fn get(&self) -> (u128, AccountId, AccountId, u16, u16, u8) {
             (
                 self.asset_id,
                 self.owner,
                 self.manager,
                 self.maximum_accounts,
+                self.daily_blocks,
                 self.status,
             )
         }
@@ -204,6 +217,8 @@ mod bank {
             account: AccountId,
             amount: u128) -> Result<(), Error> {
 
+            let current_block = self.env().block_number() as u128;
+
             // Deposit can only be done by the manager once the transfer of the 
             // asset is verified through the tx-hash.
             let caller = self.env().caller();
@@ -236,6 +251,16 @@ mod bank {
                         .checked_add(amount)
                         .ok_or(Error::AccountBalanceOverflow)?; 
 
+                    // ADB computation
+                    let blocks_elapsed = current_block
+                        .saturating_sub(ledger.adb_beginning_block);
+
+                    ledger.adb = ledger.balance
+                        .checked_mul(blocks_elapsed)
+                        .ok_or(Error::AccountBalanceOverflow)?
+                        .checked_div(self.daily_blocks.into())
+                        .unwrap_or(0);
+
                     account_found = true;
                     break;
                 }
@@ -252,6 +277,8 @@ mod bank {
                 let new_ledger = Ledger {
                     account,
                     balance: amount,
+                    adb: amount,
+                    adb_beginning_block: current_block,
                     status: 1, // 1 = Liquid
                 };
                 self.ledgers.push(new_ledger);
@@ -271,6 +298,8 @@ mod bank {
             account: AccountId,
             amount: u128) -> Result<(), ContractError> {
 
+            let current_block = self.env().block_number() as u128;
+            
             // Withdraw can only be done by the manager once the balance of the account
             // is sufficient for withdrawal
             let caller = self.env().caller();
@@ -310,6 +339,16 @@ mod bank {
 
                     // Deduct the amount
                     ledger.balance -= amount;
+
+                    // ADB computation
+                    let blocks_elapsed = current_block
+                        .saturating_sub(ledger.adb_beginning_block);
+
+                    ledger.adb = ledger.balance
+                        .checked_mul(blocks_elapsed)
+                        .ok_or(Error::AccountBalanceOverflow)?
+                        .checked_div(self.daily_blocks.into())
+                        .unwrap_or(0);                    
 
                     // Transfer the asset to the account
                     self.env()
@@ -479,6 +518,42 @@ mod bank {
 
             Ok(())
         }
+
+        /// Credit interest.  Interest are computed off-chain and needs a manual
+        /// transfer to the bank smart contract. 
+        #[ink(message)]
+        pub fn credit_interest(&mut self,
+            rate: u128) -> Result<(), Error> {
+
+            // Credit is adding to the balance of an account, this is done only
+            // by the manager.
+            let caller = self.env().caller();
+
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            }
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+            });
+
+            Ok(())
+        }
+
 
         /// Get balance of an account
         #[ink(message)]
