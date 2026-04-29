@@ -31,7 +31,9 @@ mod bank {
         /// Account debit success
         AccountDebitSuccess,
         /// Account credit success
-        AccountCreditSuccess,        
+        AccountCreditSuccess,  
+        /// Loan application success      
+        LoanApplicationSuccess,
     }    
 
     /// Bank transaction status
@@ -68,11 +70,30 @@ mod bank {
         pub status: u8,
     }        
 
+    #[derive(scale::Encode, scale::Decode, Clone, Debug, PartialEq, Eq)]
+    #[cfg_attr(feature = "std", derive(scale_info::TypeInfo, ink::storage::traits::StorageLayout))]
+    pub struct Loan {
+        /// Account address
+        pub account: AccountId,
+        /// Collateral
+        pub collateral: u128,
+        /// Loan amount
+        pub loan_amount: u128,
+        /// Paid amount
+        pub paid_amount: u128,
+        /// Computed: loan_amount - paid_amount
+        pub balance: u128,        
+        /// Liquidation price: (balance × threshold) / (collateral × 100)
+        pub liquidation_price: u128,
+    }    
+
     /// Bank storage
     #[ink(storage)]
     pub struct Bank {
         /// Bank asset
         pub asset_id: u128,
+        /// Bank loan asset
+        pub loan_asset_id: u128,
         /// Bank owner
         pub owner: AccountId,
         /// Bank manager
@@ -81,8 +102,12 @@ mod bank {
         pub maximum_accounts: u16,
         /// Daily blocks
         pub daily_blocks: u16,
+        /// Threshold (loan price threshold in percentage)
+        pub threshold: u16,
         /// Bank ledgers
         pub ledgers: Vec<Ledger>,
+        /// Bank loans
+        pub loans: Vec<Loan>,
         /// Status (0-Open, 1-Close)
         pub status: u8,
     }
@@ -92,17 +117,22 @@ mod bank {
         /// Create new bank
         #[ink(constructor)]
         pub fn new(asset_id: u128, 
+            loan_asset_id: u128,
             maximum_accounts: u16,
+            threshold: u16,
             daily_blocks: u16) -> Self {
 
             let caller: ink::primitives::AccountId = Self::env().caller();
 
             Self { 
                 asset_id: asset_id, 
+                loan_asset_id: loan_asset_id,
                 owner: caller,
                 manager: caller,
                 maximum_accounts: maximum_accounts,
+                threshold: threshold,
                 ledgers: Vec::new(),
+                loans: Vec::new(),
                 daily_blocks: daily_blocks,
                 status: 0u8,
             }
@@ -111,15 +141,17 @@ mod bank {
         /// Default setup
         #[ink(constructor)]
         pub fn default() -> Self {
-            Self::new(0u128, 0u16, 1u16)
+            Self::new(0u128, 0u128, 0u16, 0u16, 1u16)
         }
 
         /// Setup bank
         #[ink(message)]
         pub fn setup(&mut self,
             asset_id: u128,
+            loan_asset_id: u128,
             manager: AccountId,
             maximum_accounts: u16,
+            threshold: u16,
             daily_blocks: u16) -> Result<(), Error> {
             
             // Setup can only be done by the owner
@@ -134,9 +166,12 @@ mod bank {
 
             // The setup will delete all existing accounts - Very Important!
             self.asset_id = asset_id;
+            self.loan_asset_id = loan_asset_id;
             self.manager = manager;
             self.maximum_accounts = maximum_accounts;
+            self.threshold = threshold;
             self.ledgers =  Vec::new();
+            self.loans =  Vec::new();
             self.daily_blocks = daily_blocks;
             self.status = 0;
 
@@ -150,12 +185,13 @@ mod bank {
 
         /// Get the bank information
         #[ink(message)]
-        pub fn get(&self) -> (u128, AccountId, AccountId, u16, u16, u8) {
+        pub fn get(&self) -> (u128, AccountId, AccountId, u16, u16, u16, u8) {
             (
                 self.asset_id,
                 self.owner,
                 self.manager,
                 self.maximum_accounts,
+                self.threshold,
                 self.daily_blocks,
                 self.status,
             )
@@ -299,7 +335,7 @@ mod bank {
             amount: u128) -> Result<(), ContractError> {
 
             let current_block = self.env().block_number() as u128;
-            
+
             // Withdraw can only be done by the manager once the balance of the account
             // is sufficient for withdrawal
             let caller = self.env().caller();
@@ -385,6 +421,8 @@ mod bank {
             account: AccountId,
             amount: u128) -> Result<(), Error> {
             
+            let current_block = self.env().block_number() as u128;
+
             // Credit is adding to the balance of an account, this is done only
             // by the manager.
             let caller = self.env().caller();
@@ -425,7 +463,19 @@ mod bank {
 
                     // Add the amount to the balance safely
                     match ledger.balance.checked_add(amount) {
-                        Some(new_balance) => ledger.balance = new_balance,
+                        Some(new_balance) => {
+                            ledger.balance = new_balance;
+
+                            // ADB computation
+                            let blocks_elapsed = current_block
+                                .saturating_sub(ledger.adb_beginning_block);
+
+                            ledger.adb = ledger.balance
+                                .checked_mul(blocks_elapsed)
+                                .ok_or(Error::AccountBalanceOverflow)?
+                                .checked_div(self.daily_blocks.into())
+                                .unwrap_or(0);  
+                        },
                         None => {
                             self.env().emit_event(BankingEvent {
                                 operator: caller,
@@ -459,7 +509,8 @@ mod bank {
         #[ink(message)]
         pub fn debit(&mut self,
             amount: u128) -> Result<(), Error> {
-            
+
+            let current_block = self.env().block_number() as u128;
             let caller = self.env().caller();
 
             // Check if the bank is open
@@ -498,6 +549,16 @@ mod bank {
 
                     ledger.balance -= amount;
 
+                    // ADB computation
+                    let blocks_elapsed = current_block
+                        .saturating_sub(ledger.adb_beginning_block);
+
+                    ledger.adb = ledger.balance
+                        .checked_mul(blocks_elapsed)
+                        .ok_or(Error::AccountBalanceOverflow)?
+                        .checked_div(self.daily_blocks.into())
+                        .unwrap_or(0); 
+
                     break;
                 }
             }
@@ -525,6 +586,8 @@ mod bank {
         pub fn credit_interest(&mut self,
             rate: u128) -> Result<(), Error> {
 
+            let current_block = self.env().block_number() as u128;
+
             // Credit is adding to the balance of an account, this is done only
             // by the manager.
             let caller = self.env().caller();
@@ -546,6 +609,32 @@ mod bank {
                 return Ok(());
             }
 
+            for ledger in self.ledgers.iter_mut() {
+                if ledger.status == 0 {
+                    // Compute interest: interest = adb * rate / 100
+                    let interest = ledger.adb
+                        .checked_mul(rate)
+                        .ok_or(Error::AccountBalanceOverflow)?
+                        .checked_div(100)
+                        .unwrap_or(0);
+
+                    // Credit interest to balance
+                    ledger.balance = ledger.balance
+                        .checked_add(interest)
+                        .ok_or(Error::AccountBalanceOverflow)?;
+
+                    // ADB computation
+                    let blocks_elapsed = current_block
+                        .saturating_sub(ledger.adb_beginning_block);
+
+                    ledger.adb = ledger.balance
+                        .checked_mul(blocks_elapsed)
+                        .ok_or(Error::AccountBalanceOverflow)?
+                        .checked_div(self.daily_blocks.into())
+                        .unwrap_or(0);
+                }
+            }
+
             self.env().emit_event(BankingEvent {
                 operator: caller,
                 status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
@@ -554,6 +643,172 @@ mod bank {
             Ok(())
         }
 
+        /// Apply for a loan
+        /// For example: loan_amount (encoded) = $100 USDT
+        ///              price (oracle) = $0.01
+        ///              collateral (encoded) = 11,000 
+        ///              threshold (setup) = 5% (Upon liquidation the value must be $105)
+        ///              liquidation_price (computed) = $105 / 11,000 = $0.00954545454
+        /// Rules:
+        ///     1. The account must have a balance greater than the collateral.
+        ///     2. The collateral must be within the threshold.
+        ///     3. To have an acceptable liquidation_price the collateral must take into consideration the 
+        ///        volatility of the asset price or else the loan will immediately liquidated.
+        pub fn loan_application(&mut self,
+            account: AccountId,
+            loan_amount: u128,
+            price: u128,
+            collateral: u128) -> Result<(), Error> {
+            
+            let current_block = self.env().block_number() as u128;
+
+            // Loan application can only be called by the manager due to oracle input
+            let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            } 
+
+            // Check if the account is a depositor
+            let ledger_index = self.ledgers.iter().position(|l| l.account == account);
+            let ledger_index = match ledger_index {
+                Some(i) => i,
+                None => {
+                    self.env().emit_event(BankingEvent {
+                        operator: caller,
+                        status: BankTransactionStatus::EmitError(Error::AccountNotFound),
+                    });
+                    return Ok(());
+                }
+            };
+
+            // Check if the account is frozen
+            if self.ledgers[ledger_index].status == 1 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::AccountFrozen),
+                });
+                return Ok(());
+            }
+
+            // Check if the balance can cover the collateral
+            if collateral > self.ledgers[ledger_index].balance {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::AccountBalanceInsufficient),
+                });
+                return Ok(());
+            }
+
+            // Check if the collateral can cover the liquidation price
+            // 1. compute for the threshold price: current price plus the threshold.
+            // 2. use the threshold price to compute for the collateral value
+            let threshold_price = price
+                .checked_add(
+                    price
+                        .checked_mul(self.threshold.into())
+                        .ok_or(Error::LoanComputationOverflow)?
+                        .checked_div(100)
+                        .ok_or(Error::LoanComputationOverflow)?
+                )
+                .ok_or(Error::LoanComputationOverflow)?;
+
+            let collateral_value = collateral
+                .checked_mul(threshold_price)
+                .ok_or(Error::LoanComputationOverflow)?;
+
+            if loan_amount > collateral_value {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::LoanCollateralInsufficient),
+                });
+                return Ok(());
+            }
+
+            // Check if there is an existing loan, if there is none then add a loan
+            let loan_exists = self.loans.iter().any(|l| l.account == account);
+            if loan_exists {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::LoanAlreadyExist),
+                });
+                return Ok(());
+            }
+
+            // Now add the loan, but first compute for the liquidation price.
+            //      liquidation_price = (loan + threshold) / collateral
+            let loan_with_threshold = loan_amount
+                .checked_add(
+                    loan_amount
+                        .checked_mul(self.threshold as u128)
+                        .ok_or(Error::LoanComputationOverflow)?
+                        .checked_div(100)
+                        .ok_or(Error::LoanComputationOverflow)?
+                )
+                .ok_or(Error::LoanComputationOverflow)?;
+
+            let liquidation_price = loan_with_threshold
+                .checked_div(collateral)
+                .ok_or(Error::LoanComputationOverflow)?;
+
+            self.loans.push(Loan {
+                account,
+                collateral,
+                loan_amount,
+                paid_amount: 0,
+                balance: loan_amount,
+                liquidation_price,
+            });
+
+            // Success
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::LoanApplicationSuccess),
+            });
+
+            Ok(())
+        }
+
+        /// Pay loan
+        pub fn loan_payment(&mut self,
+            account: AccountId,
+            amount: u128) -> Result<(), Error> {
+            
+            let caller = self.env().caller();
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+            });
+
+            Ok(())
+        }
+        
+        /// Liquidate loan
+        pub fn loan_liquidation(&mut self,
+            price: u128) -> Result<(), Error> {
+
+            let caller = self.env().caller();
+
+            self.env().emit_event(BankingEvent {
+                operator: caller,
+                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+            });
+
+            Ok(())
+        }
 
         /// Get balance of an account
         #[ink(message)]

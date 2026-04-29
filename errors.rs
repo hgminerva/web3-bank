@@ -21,6 +21,12 @@ pub enum Error {
     AccountBalanceOverflow,
     /// Account frozen
     AccountFrozen,
+    /// Loan computation overflow
+    LoanComputationOverflow,
+    /// Loan collateral insufficient
+    LoanCollateralInsufficient,
+    /// Loan already exist
+    LoanAlreadyExist,
 }
 
 /// Runtime call execution error
