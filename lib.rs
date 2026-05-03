@@ -38,6 +38,8 @@ mod bank {
         LoanFullyPaidSuccess,
         /// Loan payment success
         LoanPaymentSuccess,
+        /// Loan liquidation success
+        LoanLiquidationSuccess,
     }    
 
     /// Bank transaction status
@@ -663,8 +665,6 @@ mod bank {
             loan_amount: u128,
             price: u128,
             collateral: u128) -> Result<(), Error> {
-            
-            let current_block = self.env().block_number() as u128;
 
             // Loan application can only be called by the manager due to oracle input
             let caller = self.env().caller();
@@ -789,8 +789,6 @@ mod bank {
         pub fn loan_payment(&mut self,
             account: AccountId,
             amount: u128) -> Result<(), Error> {
-            
-            let current_block = self.env().block_number() as u128;
 
             // Loan payment can only be called by the manager after accepting USDT transfer
             let caller = self.env().caller();
@@ -825,7 +823,26 @@ mod bank {
 
             // If the amount is greater than or equal to the balance then we delete the loan (fully paid)
             if amount >= self.loans[loan_index].balance {
+                // Remove the loan
                 self.loans.remove(loan_index);
+
+                // Find the ledger and add back the collateral to the account balance
+                let l = self.loans[loan_index].clone();
+                match self.ledgers.iter_mut().find(|l| l.account == account) {
+                    Some(ledger) => {
+                        ledger.balance = ledger.balance
+                            .checked_add(l.collateral)
+                            .ok_or(Error::LoanComputationOverflow)?;
+                    },
+                    None => {
+                        self.env().emit_event(BankingEvent {
+                            operator: caller,
+                            status: BankTransactionStatus::EmitError(Error::AccountNotFound),
+                        });
+                        return Ok(());
+                    }
+                }
+
                 self.env().emit_event(BankingEvent {
                     operator: caller,
                     status: BankTransactionStatus::EmitSuccess(Success::LoanFullyPaidSuccess),
@@ -858,13 +875,42 @@ mod bank {
         pub fn loan_liquidation(&mut self,
             price: u128) -> Result<(), Error> {
 
+            // Loan payment can only be called by the manager based on the price oracle
             let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
 
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            } 
 
+            // Loop through the loans and check if the liquidity price is higher than the price
+            // liquidate the loan by removing it.
+            let liquidation_indices: Vec<usize> = self.loans
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.liquidation_price >= price)
+                .map(|(i, _)| i)
+                .collect();
+
+            // Remove in reverse order to preserve indices during removal
+            for i in liquidation_indices.iter().rev() {
+                self.loans.remove(*i);
+            }
 
             self.env().emit_event(BankingEvent {
                 operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+                status: BankTransactionStatus::EmitSuccess(Success::LoanLiquidationSuccess),
             });
 
             Ok(())
