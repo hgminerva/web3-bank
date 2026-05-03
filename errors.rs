@@ -27,6 +27,8 @@ pub enum Error {
     LoanCollateralInsufficient,
     /// Loan already exist
     LoanAlreadyExist,
+    /// Loan not found
+    LoanNotFound,
 }
 
 /// Runtime call execution error

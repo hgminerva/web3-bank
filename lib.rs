@@ -34,6 +34,10 @@ mod bank {
         AccountCreditSuccess,  
         /// Loan application success      
         LoanApplicationSuccess,
+        /// Loan fully paid
+        LoanFullyPaidSuccess,
+        /// Loan payment success
+        LoanPaymentSuccess,
     }    
 
     /// Bank transaction status
@@ -786,11 +790,65 @@ mod bank {
             account: AccountId,
             amount: u128) -> Result<(), Error> {
             
+            let current_block = self.env().block_number() as u128;
+
+            // Loan payment can only be called by the manager after accepting USDT transfer
             let caller = self.env().caller();
+            if self.env().caller() != self.manager {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BadOrigin),
+                });
+                return Ok(());
+            } 
+
+            // Check if the bank is open
+            if self.status != 0 {
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitError(Error::BankIsClose),
+                });
+                return Ok(());
+            } 
+
+            // Search for the loan
+            let loan_index = match self.loans.iter().position(|l| l.account == account) {
+                Some(i) => i,
+                None => {
+                    self.env().emit_event(BankingEvent {
+                        operator: caller,
+                        status: BankTransactionStatus::EmitError(Error::LoanNotFound),
+                    });
+                    return Ok(());
+                }
+            };          
+
+            // If the amount is greater than or equal to the balance then we delete the loan (fully paid)
+            if amount >= self.loans[loan_index].balance {
+                self.loans.remove(loan_index);
+                self.env().emit_event(BankingEvent {
+                    operator: caller,
+                    status: BankTransactionStatus::EmitSuccess(Success::LoanFullyPaidSuccess),
+                });
+                return Ok(());
+            }
+
+            // Update the paid amount and balance
+            let loan = &mut self.loans[loan_index];
+
+            loan.paid_amount = loan.paid_amount
+                .checked_add(amount)
+                .ok_or(Error::LoanComputationOverflow)?;
+
+            // Recompute balance
+            loan.balance = loan.loan_amount
+                .checked_sub(loan.paid_amount)
+                .ok_or(Error::LoanComputationOverflow)?;
+            
 
             self.env().emit_event(BankingEvent {
                 operator: caller,
-                status: BankTransactionStatus::EmitSuccess(Success::AccountCreditSuccess),
+                status: BankTransactionStatus::EmitSuccess(Success::LoanPaymentSuccess),
             });
 
             Ok(())
@@ -801,6 +859,8 @@ mod bank {
             price: u128) -> Result<(), Error> {
 
             let caller = self.env().caller();
+
+
 
             self.env().emit_event(BankingEvent {
                 operator: caller,
