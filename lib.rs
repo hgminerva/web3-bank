@@ -660,6 +660,7 @@ mod bank {
         ///     2. The collateral must be within the threshold.
         ///     3. To have an acceptable liquidation_price the collateral must take into consideration the 
         ///        volatility of the asset price or else the loan will immediately liquidated.
+        #[ink(message)]
         pub fn loan_application(&mut self,
             account: AccountId,
             loan_amount: u128,
@@ -786,6 +787,7 @@ mod bank {
         }
 
         /// Pay loan
+        #[ink(message)]
         pub fn loan_payment(&mut self,
             account: AccountId,
             amount: u128) -> Result<(), Error> {
@@ -872,6 +874,7 @@ mod bank {
         }
         
         /// Liquidate loan
+        #[ink(message)]
         pub fn loan_liquidation(&mut self,
             price: u128) -> Result<(), Error> {
 
